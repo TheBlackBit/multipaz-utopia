@@ -10,8 +10,9 @@ An end-to-end e-commerce demo where customers browse a craft spirits catalog, ad
 
 ```
 brewery/
-├── backend/    # Ktor/Netty server — verifier + /checkout API
-└── frontend/   # Static HTML/CSS/JS storefront
+├── backend/    # Ktor/Netty server — verifier + /checkout API + checkout page routes
+├── frontend/   # Static HTML/CSS/JS storefront (+ checkout.html/js for the MCP flow)
+└── mcp/        # Node/TS agentic MCP marketplace (CredentAgent) — hands off to UPay/DPC
 ```
 
 ### `backend`
@@ -39,7 +40,24 @@ Static resources served directly from the backend classpath (copied via `process
 | `product.html` | Product detail + "Buy" checkout flow |
 | `brewery.css` | Storefront styles |
 | `brewery.js` | Checkout orchestration — calls `/checkout`, drives `multipazVerifyCredentials()` |
+| `checkout.html` / `checkout.js` | Cart-aware checkout page for the `mcp/` marketplace — fetches the order from the MCP server, then runs the same UPay/DPC `multipazVerifyCredentials()` flow |
 | `images/` | Product photography (bourbon, gin, rum, scotch, vodka, rye, pour, distillery) |
+
+### `mcp`
+
+Standalone Node/TypeScript module (not part of the Gradle build). An agentic MCP
+marketplace built on [`@openmobilehub/credentagent-storefront`](https://github.com/openmobilehub/credentagent):
+an AI agent browses the catalog and builds a cart, and **checkout hands off** to
+this backend's UPay + Digital Payment Credential ceremony (`GET /checkout` →
+`multipazVerifyCredentials()` for age + `org.multipaz.payment.sca.1`, settled by
+UPay). See [`mcp/README.md`](mcp/README.md).
+
+Run the MCP server (needs the records/enrollment + UPay + brewery backend up):
+
+```bash
+cd mcp && npm install && BREWERY_CHECKOUT_ORIGIN=http://localhost:8010 npm run dev
+# → http://localhost:3005/mcp  (add as a custom connector in Claude / ChatGPT / Goose)
+```
 
 ---
 
