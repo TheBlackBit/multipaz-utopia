@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="referrer" content="unsafe-url">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Checkout — Utopia Brewery</title>
+    <link rel="stylesheet" href="brewery.css">
+    <style>
+        .checkout-main { max-width: 640px; margin: 3rem auto; padding: 0 1.5rem; }
+        .summary-line, .summary-total { display: flex; justify-content: space-between; padding: 0.6rem 0; }
+        .summary-line { border-bottom: 1px solid rgba(0,0,0,0.08); }
+        .summary-total { font-weight: 700; margin-top: 0.4rem; }
+        #order-summary { margin: 1.5rem 0; }
+        .checkout-note { opacity: 0.7; font-size: 0.9rem; margin-top: 1rem; }
+    </style>
+    <script src="verify_credentials.js"></script>
+    <script src="checkout.js" defer></script>
+</head>
+<body>
+<header class="site-header">
+    <div class="header-inner">
+        <span class="site-logo">Utopia Brewery</span>
+    </div>
+</header>
+
+<main class="checkout-main">
+    <h1>Checkout</h1>
+    <div id="order-summary">Loading your order…</div>
+    <button id="pay-btn" class="btn-acquire" onclick="onPayClick()" disabled>
+        VERIFY AGE &amp; PAY
+    </button>
+    <p class="checkout-note">Age &amp; payment are verified with a credential from your wallet.</p>
+</main>
+
+<!-- Result overlay -->
+<div id="result-overlay" class="result-overlay hidden">
+    <div id="result-box" class="result-box">
+        <div id="result-content"></div>
+        <button class="btn-close" onclick="closeOverlay()">Close</button>
+    </div>
+</div>
+
+<!-- Loading overlay -->
+<div id="loading-overlay" class="result-overlay hidden">
+    <div class="result-box loading-box">
+        <div class="spinner"></div>
+        <p>Verifying credentials…</p>
+    </div>
+</div>
+</body>
+</html>
