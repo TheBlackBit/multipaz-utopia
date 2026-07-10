@@ -40,6 +40,7 @@ import org.multipaz.util.toBase64Url
 import org.multipaz.verifier.customization.VerifierAssistant
 import org.multipaz.verifier.customization.VerifierPresentment
 import java.lang.IllegalStateException
+import kotlin.math.round
 import kotlin.time.Clock
 
 private const val TAG = "MarketplaceHandler"
@@ -104,6 +105,107 @@ suspend fun marketplaceCheckout(call: ApplicationCall) {
         put("dcql", if (ageRestricted) MARKETPLACE_DCQL_QUERY else PAYMENT_ONLY_DCQL_QUERY)
         put("transaction_data", transactionData)
         put("nonce", paymentTransactionData.nonce.toByteArray().toBase64Url())
+    }
+    call.respondText(responsePayload.toString(), ContentType.Application.Json)
+}
+
+// ---------------------------------------------------------------------------
+// /checkout/order — cart checkout for the MCP storefront
+// ---------------------------------------------------------------------------
+
+/**
+ * Receives `{items:[{productId, quantity}], orderId}` (a whole cart) and returns
+ * `{dcql, transaction_data}` for the cart as a single **payment-only** presentation. Age is handled
+ * as a separate step (progressive disclosure): [marketplaceAgeRequest] verifies age and
+ * [marketplaceAgeVerified] records it, so this endpoint refuses an age-restricted cart whose order
+ * hasn't completed the age step. Every line's price and age-restricted flag is looked up from the
+ * server catalog by id — never trusted from the body — so the amount is the server-priced total.
+ */
+suspend fun marketplaceCheckoutOrder(call: ApplicationCall) {
+    val body = Json.parseToJsonElement(call.receiveText()).jsonObject
+    val items = body["items"]?.jsonArray
+        ?: throw InvalidRequestException("'items' is missing or not an array")
+    val orderId = body["orderId"]?.jsonPrimitive?.contentOrNull
+
+    var total = 0.0
+    var itemCount = 0
+    var ageRestricted = false
+    for (item in items) {
+        val obj = item.jsonObject
+        val productId = obj["productId"]?.jsonPrimitive?.intOrNull
+            ?: throw InvalidRequestException("'productId' is missing or not an integer")
+        val quantity = obj["quantity"]?.jsonPrimitive?.intOrNull ?: 1
+        if (quantity <= 0) continue
+        val product = findCatalogProduct(productId)
+            ?: throw InvalidRequestException("Unknown productId: $productId")
+        total += product.price.toDouble() * quantity
+        itemCount += quantity
+        if (product.ageRestricted) ageRestricted = true
+    }
+    if (itemCount == 0) throw InvalidRequestException("Cart is empty")
+    total = round(total * 100.0) / 100.0
+
+    // Progressive disclosure: age is verified in a separate step ([marketplaceAgeRequest] +
+    // [marketplaceAgeVerified]). Refuse to mint the payment for an age-restricted cart whose order
+    // hasn't completed that step — so checkout stays payment-only, yet an alcohol order still can't
+    // skip the age check.
+    if (ageRestricted && (orderId == null || !isAgeVerified(orderId))) {
+        throw InvalidRequestException("Age verification is required before checkout")
+    }
+
+    val description = "Utopia Marketplace — $itemCount item(s)"
+
+    val configuration = BackendEnvironment.getInterface(Configuration::class)!!
+    val payeeAccount = configuration.getValue("payee_account")
+        ?: throw IllegalStateException("'payee_account' is not configured")
+    val serviceUrl = configuration.enrollmentServerUrl!!
+    val paymentProcessor = getPaymentProcessor(serviceUrl)
+    val paymentTransactionData = withContext(RpcAuthClientSession()) {
+        paymentProcessor.createTransaction(PaymentTransactionRequest(
+            payeeAccount = payeeAccount,
+            description = description,
+            amount = total,
+            currency = "USD",
+        ))
+    }
+
+    val transactionData = buildJsonArray {
+        add(buildJsonObject {
+            put("type", PaymentTransaction.identifier)
+            put("credential_ids", buildJsonArray { add(JsonPrimitive("payment")) })
+            put("payload", buildJsonObject {
+                put("transaction_id", paymentTransactionData.transactionId)
+                put("payee", buildJsonObject {
+                    put("name", paymentTransactionData.payeeName)
+                    put("id", payeeAccount)
+                })
+                put("amount", total)
+                put("currency", "USD")
+            })
+        })
+    }
+    Logger.i(TAG, "Cart checkout: $itemCount item(s) at $total USD (ageRestricted=$ageRestricted)")
+
+    val responsePayload = buildJsonObject {
+        put("dcql", PAYMENT_ONLY_DCQL_QUERY)   // payment-only — age was verified in the separate step
+        put("transaction_data", transactionData)
+        put("nonce", paymentTransactionData.nonce.toByteArray().toBase64Url())
+    }
+    call.respondText(responsePayload.toString(), ContentType.Application.Json)
+}
+
+// ---------------------------------------------------------------------------
+// /checkout/age — age-only verification request (progressive disclosure step 1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns `{dcql}` requesting **only** an identity/age credential (no payment, no transaction_data).
+ * The page calls this first for an age-restricted cart; on success it records the result via
+ * [marketplaceAgeVerified], which unlocks the payment-only [marketplaceCheckoutOrder] step.
+ */
+suspend fun marketplaceAgeRequest(call: ApplicationCall) {
+    val responsePayload = buildJsonObject {
+        put("dcql", AGE_ONLY_DCQL_QUERY)
     }
     call.respondText(responsePayload.toString(), ContentType.Application.Json)
 }
@@ -248,6 +350,25 @@ private val PAYMENT_ONLY_DCQL_QUERY: JsonObject = Json.parseToJsonElement("""
 }
 """.trimIndent()).jsonObject
 
+// Age-only DCQL — MARKETPLACE_DCQL_QUERY with the payment credential and its credential_set filtered
+// out. Used by /checkout/age for the separate age step (no payment, no transaction_data), so an
+// alcohol checkout presents age first (progressive disclosure) and the payment DPC after.
+private val AGE_ONLY_DCQL_QUERY: JsonObject = buildJsonObject {
+    put("credentials", buildJsonArray {
+        MARKETPLACE_DCQL_QUERY["credentials"]!!.jsonArray.forEach { cred ->
+            if (cred.jsonObject["id"]?.jsonPrimitive?.contentOrNull != "payment") add(cred)
+        }
+    })
+    put("credential_sets", buildJsonArray {
+        MARKETPLACE_DCQL_QUERY["credential_sets"]!!.jsonArray.forEach { set ->
+            val referencesPayment = set.jsonObject["options"]?.jsonArray?.any { opt ->
+                opt.jsonArray.any { it.jsonPrimitive.contentOrNull == "payment" }
+            } == true
+            if (!referencesPayment) add(set)
+        }
+    })
+}
+
 // Identity/age credential ids that appear in the age-restricted DCQL. Their presence in a
 // request's DCQL is what tells the assistant an age check is required.
 private val AGE_CREDENTIAL_IDS = setOf("photoid", "mdl", "eupid", "aadhaar")
@@ -260,6 +381,12 @@ private val AGE_CREDENTIAL_IDS = setOf("photoid", "mdl", "eupid", "aadhaar")
 fun dcqlRequestsAge(dcql: JsonObject): Boolean {
     val credentials = dcql["credentials"]?.jsonArray ?: return false
     return credentials.any { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull in AGE_CREDENTIAL_IDS }
+}
+
+/** Returns true if [dcql] asks for the payment credential (a checkout step, not an age-only step). */
+fun dcqlRequestsPayment(dcql: JsonObject): Boolean {
+    val credentials = dcql["credentials"]?.jsonArray ?: return false
+    return credentials.any { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull == "payment" }
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +422,12 @@ class MarketplaceVerifierAssistant : VerifierAssistant {
                     put("error", "Age verification failed: must be 18 or older to purchase this item")
                 }
             }
+        }
+
+        // Age-only presentation (progressive-disclosure step 1): no payment was requested, so there
+        // is nothing to charge — report success once age passed. The payment (DPC) is a later step.
+        if (!dcqlRequestsPayment(presentment.dcql)) {
+            return buildJsonObject { put("approved", true) }
         }
 
         // DPC verification — credential_sets requires a "payment" entry, so its absence is a
